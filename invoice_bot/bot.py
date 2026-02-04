@@ -21,12 +21,12 @@ from telegram.ext import (
     filters,
 )
 
-from config import Config
-from invoice_data import InvoiceData, WorkItem
-from document_processor import DocumentProcessor
-from invoice_generator import InvoiceGenerator
-from message_templates import MessageTemplates
-from error_handler import ErrorHandler
+from invoice_bot.config import Config
+from invoice_bot.invoice_data import InvoiceData, WorkItem
+from invoice_bot.document_processor import DocumentProcessor
+from invoice_bot.invoice_generator import InvoiceGenerator
+from invoice_bot.message_templates import MessageTemplates
+from invoice_bot.error_handler import ErrorHandler
 
 # Configure logging
 logging.basicConfig(

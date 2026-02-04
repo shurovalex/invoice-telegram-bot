@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from invoice_data import InvoiceData
+from invoice_bot.invoice_data import InvoiceData
 
 logger = logging.getLogger(__name__)
 
