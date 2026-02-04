@@ -92,22 +92,8 @@ USER appuser
 # =============================================================================
 # Health check to verify application is running
 # Railway, Render, and other platforms use this for auto-restart
-HEALTHCHECK --interval=30s \
-            --timeout=10s \
-            --start-period=60s \
-            --retries=3 \
-    CMD python -c "
-import sys
-import urllib.request
-try:
-    port = __import__('os').environ.get('PORT', '8080')
-    with urllib.request.urlopen(f'http://localhost:{port}/', timeout=5) as resp:
-        if resp.status == 200:
-            sys.exit(0)
-except Exception as e:
-    print(f'Health check failed: {e}')
-    sys.exit(1)
-" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/ || exit 1
 
 # =============================================================================
 # EXPOSE PORT
