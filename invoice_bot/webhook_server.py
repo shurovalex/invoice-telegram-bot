@@ -9,8 +9,8 @@ import os
 from flask import Flask, request, jsonify
 from telegram import Update
 
-from bot import InvoiceBot
-from config import Config
+from invoice_bot.bot import InvoiceBot
+from invoice_bot.config import Config
 
 # Configure logging
 logging.basicConfig(
