@@ -1,0 +1,38 @@
+# Invoice Collection Bot - Requirements
+# Python 3.8+ required
+
+# Core Telegram Bot Library
+python-telegram-bot>=20.0
+
+# PDF Processing
+PyPDF2>=3.0.0
+pdfplumber>=0.9.0
+pdf2image>=1.16.0
+
+# Document Processing
+python-docx>=0.8.11
+
+# OCR (Optical Character Recognition)
+pytesseract>=0.3.10
+Pillow>=9.0.0
+
+# PDF Generation
+reportlab>=3.6.0
+weasyprint>=59.0  # Optional - for HTML to PDF conversion
+
+# Web Server (for webhook deployment)
+flask>=2.0.0
+gunicorn>=20.1.0
+
+# Database (optional - for persistent storage)
+# sqlalchemy>=1.4.0
+# psycopg2-binary>=2.9.0  # For PostgreSQL
+
+# Utilities
+python-dotenv>=0.19.0
+
+# Development and Testing
+pytest>=7.0.0
+pytest-asyncio>=0.20.0
+black>=22.0.0
+flake8>=5.0.0
