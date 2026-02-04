@@ -4,6 +4,7 @@ Webhook server for production deployment.
 Uses Flask to receive updates from Telegram webhook.
 """
 
+import asyncio
 import logging
 import os
 from flask import Flask, request, jsonify
@@ -27,6 +28,20 @@ config = Config()
 bot = InvoiceBot()
 application = bot.get_application()
 
+# Create event loop for async operations
+def run_async(coro):
+    """Run async coroutine in sync context."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+# Initialize the application on startup
+run_async(application.initialize())
+
 
 @app.route("/", methods=["GET"])
 def index():
@@ -44,13 +59,13 @@ def webhook():
     try:
         # Parse the update
         update = Update.de_json(request.get_json(force=True), application.bot)
-        
-        # Process the update
-        application.process_update(update)
-        
+
+        # Process the update asynchronously
+        run_async(application.process_update(update))
+
         return jsonify({"status": "ok"})
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -59,10 +74,10 @@ def set_webhook():
     """Set the webhook URL with Telegram."""
     try:
         webhook_url = f"{config.WEBHOOK_URL}{config.WEBHOOK_PATH}"
-        
-        # Set webhook
-        result = application.bot.set_webhook(url=webhook_url)
-        
+
+        # Set webhook asynchronously
+        result = run_async(application.bot.set_webhook(url=webhook_url))
+
         if result:
             logger.info(f"Webhook set to: {webhook_url}")
             return jsonify({
@@ -74,9 +89,9 @@ def set_webhook():
                 "status": "error",
                 "message": "Failed to set webhook"
             }), 500
-            
+
     except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
+        logger.error(f"Error setting webhook: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -84,8 +99,8 @@ def set_webhook():
 def delete_webhook():
     """Delete the webhook and switch back to polling."""
     try:
-        result = application.bot.delete_webhook()
-        
+        result = run_async(application.bot.delete_webhook())
+
         if result:
             logger.info("Webhook deleted")
             return jsonify({
@@ -97,9 +112,9 @@ def delete_webhook():
                 "status": "error",
                 "message": "Failed to delete webhook"
             }), 500
-            
+
     except Exception as e:
-        logger.error(f"Error deleting webhook: {e}")
+        logger.error(f"Error deleting webhook: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -107,7 +122,7 @@ def delete_webhook():
 def webhook_info():
     """Get current webhook information."""
     try:
-        info = application.bot.get_webhook_info()
+        info = run_async(application.bot.get_webhook_info())
         return jsonify({
             "status": "ok",
             "webhook_info": {
@@ -115,35 +130,21 @@ def webhook_info():
                 "has_custom_certificate": info.has_custom_certificate,
                 "pending_update_count": info.pending_update_count,
                 "ip_address": info.ip_address,
-                "last_error_date": info.last_error_date,
+                "last_error_date": str(info.last_error_date) if info.last_error_date else None,
                 "last_error_message": info.last_error_message,
                 "max_connections": info.max_connections,
                 "allowed_updates": info.allowed_updates,
             }
         })
     except Exception as e:
-        logger.error(f"Error getting webhook info: {e}")
+        logger.error(f"Error getting webhook info: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-def init_webhook():
-    """Initialize the webhook on startup."""
-    if config.is_webhook_mode:
-        webhook_url = f"{config.WEBHOOK_URL}{config.WEBHOOK_PATH}"
-        try:
-            application.bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook initialized: {webhook_url}")
-        except Exception as e:
-            logger.error(f"Failed to initialize webhook: {e}")
 
 
 if __name__ == "__main__":
     # Validate config
     config.validate()
-    
-    # Initialize webhook
-    init_webhook()
-    
+
     # Run Flask app
     port = int(os.environ.get("PORT", config.WEBHOOK_PORT))
     app.run(host="0.0.0.0", port=port, debug=False)
