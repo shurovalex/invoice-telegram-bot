@@ -4,6 +4,7 @@ Document processing module for extracting invoice data from uploaded files.
 Supports PDF, DOCX, and image files (JPEG, PNG).
 
 SELF-HEALING FEATURES:
+- E2B Sandbox agent for autonomous extraction with reasoning
 - All blocking OCR calls run in thread pool (asyncio.to_thread)
 - Timeout handling for all operations
 - Fallback to rule-based extraction on failure
@@ -31,12 +32,30 @@ DOCX_TIMEOUT = 15  # seconds
 # Quality thresholds
 MIN_QUALITY_THRESHOLD = QUALITY_THRESHOLD  # From ai_integration
 
+# Try to import E2B agent
+try:
+    from invoice_bot.e2b_agent import ExtractionAgent, E2BConfig
+    E2B_AVAILABLE = True
+except ImportError:
+    E2B_AVAILABLE = False
+    logger.warning("E2B agent not available - install e2b-code-interpreter")
+
 
 class DocumentProcessor:
     """Process uploaded documents and extract invoice data."""
-    
+
     def __init__(self):
         self.patterns = self._compile_patterns()
+
+        # Initialize E2B agent if available
+        self.e2b_agent = None
+        if E2B_AVAILABLE:
+            config = E2BConfig.from_env()
+            if config.is_available():
+                self.e2b_agent = ExtractionAgent(config)
+                logger.info("E2B extraction agent initialized")
+            else:
+                logger.warning("E2B agent not configured - missing E2B_API_KEY or OPENAI_API_KEY")
     
     def _compile_patterns(self) -> Dict[str, re.Pattern]:
         """Compile regex patterns for data extraction."""
@@ -111,18 +130,57 @@ class DocumentProcessor:
 
     async def process_document_with_healing(self, file_path: str, mime_type: str) -> InvoiceData:
         """
-        Self-healing document processing with AI quality assessment.
+        Self-healing document processing with E2B autonomous agent.
 
         This method:
-        1. Tries standard OCR extraction
-        2. Assesses quality with AI
-        3. If quality is poor, tries vision API fallback
-        4. Only returns data if quality threshold is met
+        1. FIRST: Try E2B agent (autonomous reasoning with multiple strategies)
+        2. FALLBACK: Local OCR extraction with quality assessment
+        3. FALLBACK: Enhanced OCR with preprocessing
+        4. FALLBACK: AI Vision extraction (GPT-4 Vision)
         5. Marks extraction as failed if all strategies fail
         """
         logger.info(f"[SELF-HEALING] Starting extraction: {file_path}")
 
-        # Strategy 1: Standard OCR extraction
+        # ==============================================================
+        # STRATEGY 0: E2B Autonomous Agent (PRIMARY)
+        # ==============================================================
+        if self.e2b_agent and self.e2b_agent.is_available():
+            try:
+                logger.info("[SELF-HEALING] Strategy 0: E2B Autonomous Agent")
+
+                # Read file bytes
+                with open(file_path, "rb") as f:
+                    file_bytes = f.read()
+
+                filename = os.path.basename(file_path)
+
+                # Run E2B agent extraction
+                extracted_data, agent_state = await self.e2b_agent.extract_invoice(
+                    file_bytes, filename
+                )
+
+                # Log agent reasoning
+                for reasoning in agent_state.reasoning_history:
+                    logger.info(f"[E2B-AGENT] {reasoning}")
+
+                # Check if we got good results
+                if agent_state.best_attempt and agent_state.best_attempt.quality_score >= MIN_QUALITY_THRESHOLD:
+                    logger.info(f"[E2B-AGENT] Success! Quality: {agent_state.best_attempt.quality_score:.2f}")
+
+                    # Convert to InvoiceData
+                    invoice_data = self._dict_to_invoice(extracted_data)
+                    invoice_data.extraction_confidence = agent_state.best_attempt.quality_score
+                    invoice_data.source = f"e2b_{agent_state.best_attempt.strategy.value}"
+                    return invoice_data
+
+                logger.warning(f"[E2B-AGENT] Quality below threshold, trying local fallbacks...")
+
+            except Exception as e:
+                logger.error(f"[E2B-AGENT] Error: {e}, falling back to local extraction")
+
+        # ==============================================================
+        # STRATEGY 1: Standard Local OCR extraction
+        # ==============================================================
         logger.info("[SELF-HEALING] Strategy 1: Standard OCR extraction")
         invoice_data = await self.process_document(file_path, mime_type)
         data_dict = invoice_data.to_dict()
@@ -136,7 +194,9 @@ class DocumentProcessor:
             invoice_data.extraction_confidence = quality
             return invoice_data
 
-        # Strategy 2: Enhanced OCR with preprocessing
+        # ==============================================================
+        # STRATEGY 2: Enhanced OCR with preprocessing
+        # ==============================================================
         if mime_type.startswith("image/"):
             logger.info("[SELF-HEALING] Strategy 2: Enhanced OCR with preprocessing")
             enhanced_text = await self._extract_with_preprocessing(file_path)
@@ -150,7 +210,9 @@ class DocumentProcessor:
                     invoice_data.extraction_confidence = quality
                     return invoice_data
 
-        # Strategy 3: AI Vision extraction (GPT-4 Vision)
+        # ==============================================================
+        # STRATEGY 3: AI Vision extraction (GPT-4 Vision)
+        # ==============================================================
         if mime_type.startswith("image/"):
             logger.info("[SELF-HEALING] Strategy 3: AI Vision extraction")
             vision_data = await ai_assessor.extract_with_vision(file_path)
@@ -172,6 +234,50 @@ class DocumentProcessor:
         invoice_data.extraction_failed = True
         invoice_data.extraction_confidence = quality
         return invoice_data
+
+    def _dict_to_invoice(self, data: Dict[str, Any]) -> InvoiceData:
+        """Convert extracted dictionary to InvoiceData object."""
+        invoice = InvoiceData()
+        invoice.source = "e2b_agent"
+
+        # Map fields
+        invoice.contractor_name = data.get('contractor_name') or ""
+        invoice.contractor_email = data.get('contractor_email') or ""
+        invoice.contractor_address = data.get('contractor_address') or ""
+        invoice.contractor_utr = data.get('contractor_utr') or ""
+        invoice.contractor_ni = data.get('contractor_ni') or ""
+        invoice.bank_account = data.get('bank_account') or ""
+        invoice.sort_code = data.get('sort_code') or ""
+        invoice.invoice_number = data.get('invoice_number') or ""
+        invoice.invoice_date = data.get('invoice_date') or ""
+        invoice.work_start_date = data.get('work_start_date') or ""
+        invoice.work_end_date = data.get('work_end_date') or ""
+
+        # Financial data (handle None values)
+        try:
+            invoice.subtotal = float(data.get('subtotal') or 0)
+        except (ValueError, TypeError):
+            invoice.subtotal = 0.0
+
+        try:
+            invoice.vat_amount = float(data.get('vat_amount') or 0)
+        except (ValueError, TypeError):
+            invoice.vat_amount = 0.0
+
+        try:
+            invoice.cis_amount = float(data.get('cis_amount') or 0)
+        except (ValueError, TypeError):
+            invoice.cis_amount = 0.0
+
+        try:
+            invoice.total = float(data.get('total') or 0)
+        except (ValueError, TypeError):
+            invoice.total = 0.0
+
+        if invoice.total == 0:
+            invoice.calculate_total()
+
+        return invoice
 
     async def _extract_with_preprocessing(self, file_path: str) -> str:
         """
