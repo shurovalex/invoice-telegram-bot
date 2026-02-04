@@ -106,18 +106,22 @@ class ExtractionAgent:
 
         sandbox = None
         try:
-            # Create sandbox
+            # Create sandbox (blocking call - run in thread)
             state.reasoning_history.append("Creating E2B sandbox...")
-            sandbox = Sandbox(
+            logger.info("[E2B] Creating sandbox...")
+            sandbox = await asyncio.to_thread(
+                Sandbox,
                 api_key=self.config.E2B_API_KEY,
                 timeout=self.config.SANDBOX_TIMEOUT
             )
+            logger.info(f"[E2B] Sandbox created: {sandbox}")
 
             # Install required packages
             await self._install_packages(sandbox, state)
 
-            # Write file to sandbox
-            sandbox.files.write(state.file_path, file_bytes)
+            # Write file to sandbox (blocking call - run in thread)
+            logger.info(f"[E2B] Writing file to sandbox: {state.file_path}")
+            await asyncio.to_thread(sandbox.files.write, state.file_path, file_bytes)
             state.reasoning_history.append(f"Uploaded file to sandbox: {state.file_path}")
 
             # Agent reasoning loop
@@ -188,13 +192,15 @@ class ExtractionAgent:
             state.reasoning_history.append(f"E2B error: {e}")
 
         finally:
-            # Always close sandbox
+            # Always close sandbox (blocking call - run in thread)
             if sandbox:
                 try:
-                    sandbox.close()
+                    logger.info("[E2B] Closing sandbox...")
+                    await asyncio.to_thread(sandbox.close)
                     state.reasoning_history.append("Sandbox closed")
-                except:
-                    pass
+                    logger.info("[E2B] Sandbox closed successfully")
+                except Exception as e:
+                    logger.warning(f"[E2B] Error closing sandbox: {e}")
 
         # If no good result, try GPT-4 Vision as final fallback
         if (state.best_attempt is None or
@@ -234,6 +240,7 @@ class ExtractionAgent:
         packages = ["pytesseract", "Pillow", "pdfplumber"]
 
         state.reasoning_history.append(f"Installing packages: {packages}")
+        logger.info(f"[E2B] Installing packages: {packages}")
 
         try:
             # Install via pip
@@ -243,11 +250,15 @@ import sys
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", {', '.join(f'"{p}"' for p in packages)}])
 print("Packages installed successfully")
 """
-            result = sandbox.run_code(install_code)
+            # Run in thread (blocking call)
+            result = await asyncio.to_thread(sandbox.run_code, install_code)
+            logger.info(f"[E2B] Package install result: {result}")
             if result.error:
                 state.reasoning_history.append(f"Package install warning: {result.error}")
+                logger.warning(f"[E2B] Package install error: {result.error}")
         except Exception as e:
             state.reasoning_history.append(f"Package install error: {e}")
+            logger.error(f"[E2B] Package install exception: {e}")
 
     async def _execute_strategy(
         self,
@@ -262,11 +273,14 @@ print("Packages installed successfully")
             # Prepare code
             code = strategy.code_template.format(file_path=state.file_path)
 
-            # Execute
-            result = sandbox.run_code(code)
+            # Execute in thread (blocking call)
+            logger.info(f"[E2B] Executing strategy: {strategy.name}")
+            result = await asyncio.to_thread(sandbox.run_code, code)
+            logger.info(f"[E2B] Strategy execution complete, result: {result}")
 
             # Parse output
             raw_text = self._parse_output(result.logs.stdout if result.logs else "")
+            logger.info(f"[E2B] Extracted text length: {len(raw_text)}")
 
             if result.error:
                 return ExtractionAttempt(
