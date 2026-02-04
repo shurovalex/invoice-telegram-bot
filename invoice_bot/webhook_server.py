@@ -28,15 +28,13 @@ config = Config()
 bot = InvoiceBot()
 application = bot.get_application()
 
-# Create event loop for async operations
+# Create a persistent event loop for async operations
+_loop = asyncio.new_event_loop()
+asyncio.set_event_loop(_loop)
+
 def run_async(coro):
     """Run async coroutine in sync context."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    return _loop.run_until_complete(coro)
 
 
 # Initialize the application on startup
