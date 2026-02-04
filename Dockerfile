@@ -107,15 +107,15 @@ EXPOSE ${PORT}
 # =============================================================================
 # Use exec form to ensure proper signal handling
 # Gunicorn configuration optimized for Telegram bot webhooks:
-# - workers: 2 (handle concurrent requests)
-# - threads: 4 (handle I/O-bound operations)
+# - workers: 1 (CRITICAL: single worker to preserve ConversationHandler state)
+# - threads: 8 (handle I/O-bound operations, compensates for single worker)
 # - timeout: 120s (allow time for document processing)
 # - access-logfile: - (stdout for Railway/Render logs)
 # - error-logfile: - (stderr for Railway/Render logs)
 CMD exec gunicorn \
     --bind 0.0.0.0:${PORT} \
-    --workers 2 \
-    --threads 4 \
+    --workers 1 \
+    --threads 8 \
     --worker-class gthread \
     --timeout 120 \
     --keep-alive 5 \
