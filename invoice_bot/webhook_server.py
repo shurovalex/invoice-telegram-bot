@@ -37,8 +37,9 @@ def run_async(coro):
     return _loop.run_until_complete(coro)
 
 
-# Initialize the application on startup
+# Initialize and start the application on startup
 run_async(application.initialize())
+run_async(application.start())
 
 
 @app.route("/", methods=["GET"])
