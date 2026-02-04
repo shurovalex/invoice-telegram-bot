@@ -2,16 +2,24 @@
 """
 Webhook server for production deployment.
 Uses Flask to receive updates from Telegram webhook.
+
+SELF-HEALING ARCHITECTURE:
+- Orchestrator tracks all tasks with timeouts
+- Watchdog monitors for stuck operations
+- Automatic recovery without human intervention
 """
 
 import asyncio
 import logging
 import os
+import threading
 from flask import Flask, request, jsonify
 from telegram import Update
 
 from invoice_bot.bot import InvoiceBot
 from invoice_bot.config import Config
+from invoice_bot.orchestrator import Orchestrator
+from invoice_bot.watchdog import Watchdog, HealthMonitor
 
 # Configure logging
 logging.basicConfig(
@@ -23,10 +31,10 @@ logger = logging.getLogger(__name__)
 # Create Flask app
 app = Flask(__name__)
 
-# Initialize bot
+# Initialize bot and config
 config = Config()
-bot = InvoiceBot()
-application = bot.get_application()
+bot_instance = InvoiceBot()
+application = bot_instance.get_application()
 
 # Create a persistent event loop for async operations
 _loop = asyncio.new_event_loop()
@@ -37,18 +45,55 @@ def run_async(coro):
     return _loop.run_until_complete(coro)
 
 
-# Initialize and start the application on startup
+# Initialize the application
 run_async(application.initialize())
 run_async(application.start())
+
+# Initialize Self-Healing Components
+orchestrator = Orchestrator(application.bot)
+watchdog = Watchdog(orchestrator, check_interval=5.0)
+health_monitor = HealthMonitor(orchestrator, watchdog)
+
+# Store orchestrator in app context for handlers to access
+app.orchestrator = orchestrator
+
+
+def start_watchdog_in_background():
+    """Start the watchdog in a background thread with its own event loop."""
+    def run_watchdog():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(watchdog.start())
+            # Keep the watchdog running
+            loop.run_until_complete(asyncio.Event().wait())
+        except Exception as e:
+            logger.error(f"Watchdog thread error: {e}")
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=run_watchdog, daemon=True)
+    thread.start()
+    logger.info("Watchdog started in background thread")
+
+
+# Start watchdog on module load
+start_watchdog_in_background()
 
 
 @app.route("/", methods=["GET"])
 def index():
-    """Health check endpoint."""
+    """Health check endpoint with self-healing status."""
+    health = health_monitor.get_full_status()
     return jsonify({
-        "status": "ok",
+        "status": "ok" if health["healthy"] else "degraded",
         "service": "Invoice Collection Bot",
-        "version": "1.0.0"
+        "version": "2.0.0-self-healing",
+        "self_healing": {
+            "orchestrator_active": True,
+            "watchdog_active": watchdog._running,
+            "active_tasks": health["orchestrator"]["active_tasks"],
+        }
     })
 
 
@@ -65,7 +110,9 @@ def webhook():
         return jsonify({"status": "ok"})
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # Even on error, return 200 to prevent Telegram from retrying
+        # The self-healing system will handle recovery
+        return jsonify({"status": "error", "message": str(e)}), 200
 
 
 @app.route("/set-webhook", methods=["GET"])
@@ -137,6 +184,37 @@ def webhook_info():
         })
     except Exception as e:
         logger.error(f"Error getting webhook info: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """Detailed health check endpoint for self-healing system."""
+    try:
+        status = health_monitor.get_full_status()
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Error getting health status: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/orchestrator/tasks", methods=["GET"])
+def orchestrator_tasks():
+    """Get all tracked tasks from orchestrator."""
+    try:
+        return jsonify(orchestrator.get_health_status())
+    except Exception as e:
+        logger.error(f"Error getting orchestrator tasks: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/watchdog/stats", methods=["GET"])
+def watchdog_stats():
+    """Get watchdog statistics."""
+    try:
+        return jsonify(watchdog.get_stats())
+    except Exception as e:
+        logger.error(f"Error getting watchdog stats: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 

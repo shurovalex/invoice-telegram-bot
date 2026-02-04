@@ -2,17 +2,30 @@
 """
 Document processing module for extracting invoice data from uploaded files.
 Supports PDF, DOCX, and image files (JPEG, PNG).
+
+SELF-HEALING FEATURES:
+- All blocking OCR calls run in thread pool (asyncio.to_thread)
+- Timeout handling for all operations
+- Fallback to rule-based extraction on failure
+- Detailed logging for debugging
 """
 
+import asyncio
 import os
 import re
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from functools import partial
 
 from invoice_bot.invoice_data import InvoiceData, WorkItem
 
 logger = logging.getLogger(__name__)
+
+# Timeouts for different operations
+OCR_TIMEOUT = 30  # seconds
+PDF_TIMEOUT = 45  # seconds
+DOCX_TIMEOUT = 15  # seconds
 
 
 class DocumentProcessor:
@@ -109,42 +122,95 @@ class DocumentProcessor:
             return ""
     
     async def _extract_from_pdf(self, file_path: str) -> str:
-        """Extract text from PDF file."""
+        """
+        Extract text from PDF file.
+
+        SELF-HEALING: Multiple fallback methods with timeout protection.
+        """
+        # Try PyPDF2 first (fast, text-based PDFs)
         try:
-            # Try PyPDF2 first
             from PyPDF2 import PdfReader
-            reader = PdfReader(file_path)
-            text = ""
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-            return text
+
+            def _sync_pypdf():
+                reader = PdfReader(file_path)
+                text = ""
+                for page in reader.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+                return text
+
+            logger.info("Trying PyPDF2 extraction...")
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_sync_pypdf),
+                timeout=PDF_TIMEOUT
+            )
+            if text.strip():
+                logger.info(f"PyPDF2 extracted {len(text)} characters")
+                return text
         except ImportError:
-            logger.warning("PyPDF2 not available, trying pdfplumber")
-        
+            logger.warning("PyPDF2 not available")
+        except asyncio.TimeoutError:
+            logger.warning("PyPDF2 timed out")
+        except Exception as e:
+            logger.warning(f"PyPDF2 failed: {e}")
+
+        # Fallback to pdfplumber
         try:
-            # Fallback to pdfplumber
             import pdfplumber
-            text = ""
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    text += page.extract_text() + "\n"
-            return text
+
+            def _sync_pdfplumber():
+                text = ""
+                with pdfplumber.open(file_path) as pdf:
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+                return text
+
+            logger.info("Trying pdfplumber extraction...")
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_sync_pdfplumber),
+                timeout=PDF_TIMEOUT
+            )
+            if text.strip():
+                logger.info(f"pdfplumber extracted {len(text)} characters")
+                return text
         except ImportError:
             logger.warning("pdfplumber not available")
-        
-        # Last resort: OCR with pdf2image
+        except asyncio.TimeoutError:
+            logger.warning("pdfplumber timed out")
+        except Exception as e:
+            logger.warning(f"pdfplumber failed: {e}")
+
+        # Last resort: OCR with pdf2image (slow, for scanned PDFs)
         try:
             from pdf2image import convert_from_path
             import pytesseract
-            
-            images = convert_from_path(file_path)
-            text = ""
-            for image in images:
-                text += pytesseract.image_to_string(image) + "\n"
+
+            def _sync_pdf_ocr():
+                images = convert_from_path(file_path)
+                text = ""
+                for i, image in enumerate(images):
+                    logger.info(f"OCR processing page {i+1}/{len(images)}")
+                    text += pytesseract.image_to_string(image) + "\n"
+                return text
+
+            logger.info("Trying PDF OCR extraction (this may take a while)...")
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_sync_pdf_ocr),
+                timeout=PDF_TIMEOUT * 2  # Double timeout for OCR
+            )
+            logger.info(f"PDF OCR extracted {len(text)} characters")
             return text
         except ImportError:
             logger.error("No PDF extraction library available")
-            return ""
+        except asyncio.TimeoutError:
+            logger.error(f"PDF OCR timed out after {PDF_TIMEOUT * 2}s")
+        except Exception as e:
+            logger.error(f"PDF OCR failed: {e}")
+
+        return ""
     
     async def _extract_from_docx(self, file_path: str) -> str:
         """Extract text from DOCX file."""
@@ -168,16 +234,38 @@ class DocumentProcessor:
             return ""
     
     async def _extract_from_image(self, file_path: str) -> str:
-        """Extract text from image using OCR."""
+        """
+        Extract text from image using OCR.
+
+        SELF-HEALING: Runs in thread pool with timeout to prevent blocking.
+        """
         try:
             import pytesseract
             from PIL import Image
-            
-            image = Image.open(file_path)
-            text = pytesseract.image_to_string(image)
+
+            def _sync_ocr():
+                """Synchronous OCR operation to run in thread pool."""
+                image = Image.open(file_path)
+                return pytesseract.image_to_string(image)
+
+            # Run blocking OCR in thread pool with timeout
+            logger.info(f"Starting OCR for {file_path} (timeout: {OCR_TIMEOUT}s)")
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_sync_ocr),
+                timeout=OCR_TIMEOUT
+            )
+            logger.info(f"OCR completed, extracted {len(text)} characters")
             return text
+
+        except asyncio.TimeoutError:
+            logger.error(f"OCR timed out after {OCR_TIMEOUT}s for {file_path}")
+            # Return empty string - orchestrator will handle fallback
+            return ""
         except ImportError:
             logger.error("pytesseract or PIL not available")
+            return ""
+        except Exception as e:
+            logger.error(f"OCR error: {e}")
             return ""
     
     def _parse_invoice_data(self, text: str) -> InvoiceData:
