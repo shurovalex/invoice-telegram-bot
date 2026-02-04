@@ -163,7 +163,7 @@ class InvoiceBot:
                 CommandHandler("help", self._help),
             ],
             name="invoice_conversation",
-            persistent=True,
+            persistent=False,
         )
     
     # ============ ENTRY POINT ============
