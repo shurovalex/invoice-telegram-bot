@@ -19,6 +19,7 @@ from datetime import datetime
 from functools import partial
 
 from invoice_bot.invoice_data import InvoiceData, WorkItem
+from invoice_bot.ai_integration import ai_assessor, QUALITY_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ logger = logging.getLogger(__name__)
 OCR_TIMEOUT = 30  # seconds
 PDF_TIMEOUT = 45  # seconds
 DOCX_TIMEOUT = 15  # seconds
+
+# Quality thresholds
+MIN_QUALITY_THRESHOLD = QUALITY_THRESHOLD  # From ai_integration
 
 
 class DocumentProcessor:
@@ -99,11 +103,153 @@ class DocumentProcessor:
             return InvoiceData()
         
         logger.info(f"Extracted text length: {len(text)}")
-        
+
         # Parse invoice data from text
         invoice_data = self._parse_invoice_data(text)
-        
+
         return invoice_data
+
+    async def process_document_with_healing(self, file_path: str, mime_type: str) -> InvoiceData:
+        """
+        Self-healing document processing with AI quality assessment.
+
+        This method:
+        1. Tries standard OCR extraction
+        2. Assesses quality with AI
+        3. If quality is poor, tries vision API fallback
+        4. Only returns data if quality threshold is met
+        5. Marks extraction as failed if all strategies fail
+        """
+        logger.info(f"[SELF-HEALING] Starting extraction: {file_path}")
+
+        # Strategy 1: Standard OCR extraction
+        logger.info("[SELF-HEALING] Strategy 1: Standard OCR extraction")
+        invoice_data = await self.process_document(file_path, mime_type)
+        data_dict = invoice_data.to_dict()
+
+        # Assess quality
+        quality = await ai_assessor.assess_quality(data_dict)
+        logger.info(f"[SELF-HEALING] OCR quality score: {quality:.2f}")
+
+        if quality >= MIN_QUALITY_THRESHOLD:
+            logger.info(f"[SELF-HEALING] Quality acceptable ({quality:.2f} >= {MIN_QUALITY_THRESHOLD})")
+            invoice_data.extraction_confidence = quality
+            return invoice_data
+
+        # Strategy 2: Enhanced OCR with preprocessing
+        if mime_type.startswith("image/"):
+            logger.info("[SELF-HEALING] Strategy 2: Enhanced OCR with preprocessing")
+            enhanced_text = await self._extract_with_preprocessing(file_path)
+            if enhanced_text:
+                invoice_data = self._parse_invoice_data(enhanced_text)
+                data_dict = invoice_data.to_dict()
+                quality = await ai_assessor.assess_quality(data_dict)
+                logger.info(f"[SELF-HEALING] Enhanced OCR quality: {quality:.2f}")
+
+                if quality >= MIN_QUALITY_THRESHOLD:
+                    invoice_data.extraction_confidence = quality
+                    return invoice_data
+
+        # Strategy 3: AI Vision extraction (GPT-4 Vision)
+        if mime_type.startswith("image/"):
+            logger.info("[SELF-HEALING] Strategy 3: AI Vision extraction")
+            vision_data = await ai_assessor.extract_with_vision(file_path)
+
+            if vision_data:
+                # Convert vision data to InvoiceData
+                invoice_data = self._vision_data_to_invoice(vision_data)
+                data_dict = invoice_data.to_dict()
+                quality = await ai_assessor.assess_quality(data_dict)
+                logger.info(f"[SELF-HEALING] Vision extraction quality: {quality:.2f}")
+
+                if quality >= MIN_QUALITY_THRESHOLD:
+                    invoice_data.extraction_confidence = quality
+                    invoice_data.source = "ai_vision"
+                    return invoice_data
+
+        # All strategies failed
+        logger.warning(f"[SELF-HEALING] All extraction strategies failed (best quality: {quality:.2f})")
+        invoice_data.extraction_failed = True
+        invoice_data.extraction_confidence = quality
+        return invoice_data
+
+    async def _extract_with_preprocessing(self, file_path: str) -> str:
+        """
+        Extract text with image preprocessing for better OCR.
+
+        Applies:
+        - Grayscale conversion
+        - Contrast enhancement
+        - Noise reduction
+        - Thresholding
+        """
+        try:
+            import pytesseract
+            from PIL import Image, ImageEnhance, ImageFilter
+
+            def _sync_enhanced_ocr():
+                # Open and preprocess image
+                image = Image.open(file_path)
+
+                # Convert to grayscale
+                if image.mode != 'L':
+                    image = image.convert('L')
+
+                # Enhance contrast
+                enhancer = ImageEnhance.Contrast(image)
+                image = enhancer.enhance(2.0)
+
+                # Apply sharpening
+                image = image.filter(ImageFilter.SHARPEN)
+
+                # Apply threshold for cleaner text
+                threshold = 150
+                image = image.point(lambda p: 255 if p > threshold else 0)
+
+                # OCR with optimized settings
+                custom_config = r'--oem 3 --psm 6'
+                return pytesseract.image_to_string(image, config=custom_config)
+
+            logger.info("Running enhanced OCR with preprocessing...")
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_sync_enhanced_ocr),
+                timeout=OCR_TIMEOUT
+            )
+            logger.info(f"Enhanced OCR extracted {len(text)} characters")
+            return text
+
+        except Exception as e:
+            logger.error(f"Enhanced OCR failed: {e}")
+            return ""
+
+    def _vision_data_to_invoice(self, vision_data: dict) -> InvoiceData:
+        """Convert AI Vision extraction result to InvoiceData object."""
+        invoice = InvoiceData()
+        invoice.source = "ai_vision"
+
+        # Map vision data to invoice fields
+        invoice.contractor_name = vision_data.get('contractor_name') or ""
+        invoice.contractor_email = vision_data.get('contractor_email') or ""
+        invoice.contractor_address = vision_data.get('contractor_address') or ""
+        invoice.contractor_utr = vision_data.get('contractor_utr') or ""
+        invoice.contractor_ni = vision_data.get('contractor_ni') or ""
+        invoice.bank_account = vision_data.get('bank_account') or ""
+        invoice.sort_code = vision_data.get('sort_code') or ""
+        invoice.invoice_number = vision_data.get('invoice_number') or ""
+        invoice.invoice_date = vision_data.get('invoice_date') or ""
+        invoice.work_start_date = vision_data.get('work_start_date') or ""
+        invoice.work_end_date = vision_data.get('work_end_date') or ""
+
+        # Financial data
+        invoice.subtotal = float(vision_data.get('subtotal') or 0)
+        invoice.vat_amount = float(vision_data.get('vat_amount') or 0)
+        invoice.cis_amount = float(vision_data.get('cis_amount') or 0)
+        invoice.total = float(vision_data.get('total') or 0)
+
+        if invoice.total == 0:
+            invoice.calculate_total()
+
+        return invoice
     
     async def _extract_text(self, file_path: str, mime_type: str) -> str:
         """Extract text from various document types."""

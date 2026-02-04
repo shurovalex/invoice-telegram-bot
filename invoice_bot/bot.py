@@ -269,9 +269,29 @@ class InvoiceBot:
                 tmp_path = tmp_file.name
             
             logger.info(f"Downloaded file: {tmp_path}, MIME: {mime_type}")
-            
-            # Process document
-            invoice_data = await self.doc_processor.process_document(tmp_path, mime_type)
+
+            # Process document with self-healing (AI quality assessment + retry)
+            invoice_data = await self.doc_processor.process_document_with_healing(tmp_path, mime_type)
+
+            # Check if extraction failed completely
+            if invoice_data.extraction_failed:
+                logger.warning(f"Extraction failed for {tmp_path}, confidence: {invoice_data.extraction_confidence}")
+                os.unlink(tmp_path)
+                if processing_msg:
+                    await processing_msg.delete()
+
+                await update.message.reply_text(
+                    "⚠️ **Extraction Failed**\n\n"
+                    "I couldn't extract clear data from this document. "
+                    "The image quality may be too low or the text unreadable.\n\n"
+                    "**Please try:**\n"
+                    "• Taking a clearer photo with better lighting\n"
+                    "• Uploading a PDF instead of an image\n"
+                    "• Using /chat to enter details manually\n\n"
+                    f"_Quality score: {invoice_data.extraction_confidence:.0%}_",
+                    parse_mode="Markdown",
+                )
+                return UPLOAD_DOCUMENT
             
             # Clean up temp file
             os.unlink(tmp_path)

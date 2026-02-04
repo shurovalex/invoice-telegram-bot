@@ -70,7 +70,11 @@ class InvoiceData:
     
     # Metadata
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    source: str = ""  # 'upload' or 'chat'
+    source: str = ""  # 'upload', 'chat', or 'ai_vision'
+
+    # Self-healing extraction metadata
+    extraction_failed: bool = False  # True if all extraction strategies failed
+    extraction_confidence: float = 0.0  # AI-assessed quality score (0.0 to 1.0)
     
     def calculate_total(self) -> float:
         """Calculate total amount."""
