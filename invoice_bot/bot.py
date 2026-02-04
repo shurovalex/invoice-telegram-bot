@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
     CONFIRM_SUMMARY,      # Confirm all data
     # Final
     GENERATE_INVOICE,     # Generate invoice
-) = range(28)
+) = range(27)
 
 
 class InvoiceBot:
